@@ -14,6 +14,8 @@
 # limitations under the License.
 """ PyTorch GPTNeoX model."""
 
+from tfs_text_generation.tfs_utils import tensors_size_summary, shape_summary
+from utils.gpu_info import GpuInfo
 from typing import Optional, Tuple, Union
 
 import torch
@@ -32,6 +34,21 @@ from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ...modeling_utils import PreTrainedModel
 from ...utils import logging
 from .configuration_gpt_neox import GPTNeoXConfig
+
+import logzero
+
+logzero.logger.error('modling_gpt_neox.py loaded')
+print_emb_init = False
+print_emb = False
+print_fwd_attn = False
+print_attn = False
+
+
+def d(t):
+    return f'({t.numel():,} params as {t.dtype} on {t.device})'
+
+
+gpuinfo = GpuInfo()
 
 
 logger = logging.get_logger(__name__)
@@ -77,7 +94,7 @@ class GPTNeoXPreTrainedModel(PreTrainedModel):
 
 
 class GPTNeoXAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, i):
         super().__init__()
         self.num_attention_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -97,6 +114,8 @@ class GPTNeoXAttention(nn.Module):
         self.norm_factor = torch.sqrt(torch.tensor(self.head_size, dtype=torch.float32)).to(torch.get_default_dtype())
         self.query_key_value = nn.Linear(config.hidden_size, 3 * config.hidden_size)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.name = f'gneo_attn_{i}'
+#        logzero.logger.error(f'{self.name}: {id(self)}')
 
     def forward(
         self,
@@ -113,16 +132,20 @@ class GPTNeoXAttention(nn.Module):
         # Attention heads [batch, seq_len, hidden_size]
         #   --> [batch, seq_len, (np * 3 * head_size)]
         qkv = self.query_key_value(hidden_states)
+        print_fwd_attn and logzero.logger.error(f'qkv = {d(qkv)}')
 
         # [batch, seq_len, (num_heads * 3 * head_size)]
         #   --> [batch, seq_len, num_heads, 3 * head_size]
         new_qkv_shape = qkv.size()[:-1] + (self.num_attention_heads, 3 * self.head_size)
         qkv = qkv.view(*new_qkv_shape)
+        print_fwd_attn and logzero.logger.error(f'qkv = {d(qkv)}')
 
         # [batch, seq_len, num_attention_heads, 3 * head_size] --> 3 [batch, num_attention_heads, seq_len, head_size]
         query = qkv[..., : self.head_size].permute(0, 2, 1, 3)
         key = qkv[..., self.head_size : 2 * self.head_size].permute(0, 2, 1, 3)
         value = qkv[..., 2 * self.head_size :].permute(0, 2, 1, 3)
+
+        print_fwd_attn and logzero.logger.error(f'query = {d(query)}')
 
         # Compute rotary embeddings on rotary_ndims
         query_rot = query[..., : self.rotary_ndims]
@@ -137,9 +160,15 @@ class GPTNeoXAttention(nn.Module):
             offset = layer_past[0].shape[-2]
             seq_len += offset
         cos, sin = self.rotary_emb(value, seq_len=seq_len)
+        print_fwd_attn and logzero.logger.error(f'value = {d(value)}')
+        print_fwd_attn and logzero.logger.error(f'cos = {d(cos)}')
+        print_fwd_attn and logzero.logger.error(f'sin = {d(sin)}')
         query, key = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, offset=offset)
+        print_fwd_attn and logzero.logger.error(f'query = {d(query)}')
         query = torch.cat((query, query_pass), dim=-1)
         key = torch.cat((key, key_pass), dim=-1)
+
+        print_fwd_attn and logzero.logger.error(f'query = {d(query)}')
 
         # Cache QKV values
         if has_layer_past:
@@ -151,6 +180,7 @@ class GPTNeoXAttention(nn.Module):
 
         # Compute attention
         attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+        print_fwd_attn and logzero.logger.error(f'attn_weights = {d(attn_weights)}')
 
         # Reshape outputs
         attn_output = self._merge_heads(attn_output, self.num_attention_heads, self.head_size)
@@ -224,6 +254,11 @@ class GPTNeoXAttention(nn.Module):
             attn_scores = attn_scores + attention_mask
 
         attn_weights = nn.functional.softmax(attn_scores, dim=-1)
+
+        print_attn and logzero.logger.error(f'[{self.name}] attn_weights: {shape_summary(attn_weights)} {tensors_size_summary(attn_weights)}')
+        print_attn and logzero.logger.error(f'[{self.name}] converting attn_weights from {attn_weights.dtype} to {value.dtype}')
+
+        # fp16がうまくいかないとここでメモリを余計に食う。
         attn_weights = attn_weights.to(value.dtype)
 
         # Mask heads if we want to
@@ -241,26 +276,36 @@ def attention_mask_func(attention_scores, ltor_mask):
 
 class RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings, base=10000, device=None):
+        print_emb_init and logzero.logger.error(f'RotaryEmbedding.__init__: device = {device}')
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
         self.register_buffer("inv_freq", inv_freq)
+        print_emb_init and logzero.logger.error(f'RotaryEmbedding.__init__: inv_freq = {d(inv_freq)}')
 
         # Build here to make `torch.jit.trace` work.
         self.max_seq_len_cached = max_position_embeddings
+        print_emb_init and logzero.logger.error(f'RotaryEmbedding.__init__: self.inv_freq = {d(self.inv_freq)}')
         t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        print_emb_init and logzero.logger.error(f'RotaryEmbedding.__init__: t = {d(t)}')
+        print_emb_init and logzero.logger.error(f'RotaryEmbedding.__init__: freqs = {d(freqs)}')
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.cos_cached = emb.cos()[None, None, :, :]
-        self.sin_cached = emb.sin()[None, None, :, :]
+        self.cos_cached = emb.cos()[None, None, :, :]  # .to(torch.float16)
+        self.sin_cached = emb.sin()[None, None, :, :]  # .to(torch.float16)
+        print_emb_init and logzero.logger.error(f'RotaryEmbedding.__init__: self.cos_cached = {d(self.cos_cached)}')
+        print_emb_init and logzero.logger.error(f'RotaryEmbedding.__init__: self.sin_cached = {d(self.sin_cached)}')
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         # This `if` block is unlikely to be run after we build sin/cos in `__init__`. Keep the logic here just in case.
+        print_emb and logzero.logger.error(f'RotaryEmbedding.forward: x = {d(x)}')
         if seq_len > self.max_seq_len_cached:
             self.max_seq_len_cached = seq_len
             t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
+            print_emb and logzero.logger.error(f'RotaryEmbedding.forward: t = {d(t)}')
             freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+            print_emb and logzero.logger.error(f'RotaryEmbedding.forward: freqs = {d(freqs)}')
             # Different from paper, but it uses a different permutation in order to obtain the same calculation
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
             self.cos_cached = emb.cos()[None, None, :, :]
@@ -284,8 +329,12 @@ def rotate_half(x):
 def apply_rotary_pos_emb(q, k, cos, sin, offset: int = 0):
     cos = cos[..., offset : q.shape[-2] + offset, :]
     sin = sin[..., offset : q.shape[-2] + offset, :]
+#    print_emb and logzero.logger.error(f'cos = {cos.numel():,}, {cos.dtype}')
+#    print_emb and logzero.logger.error(f'sin = {sin.numel():,}, {sin.dtype}')
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
+#    print_emb and logzero.logger.error(f'q_embed = {q_embed.numel():,}, {q_embed.dtype}')
+#    print_emb and logzero.logger.error(f'k_embed = {k_embed.numel():,}, {k_embed.dtype}')
     return q_embed, k_embed
 
 
@@ -304,13 +353,14 @@ class GPTNeoXMLP(nn.Module):
 
 
 class GPTNeoXLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, i):
         super().__init__()
         self.use_parallel_residual = config.use_parallel_residual
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.attention = GPTNeoXAttention(config)
+        self.attention = GPTNeoXAttention(config, i)
         self.mlp = GPTNeoXMLP(config)
+        self.name = f'gneo_layr_{i}'
 
     def forward(
         self,
@@ -411,7 +461,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         self.config = config
 
         self.embed_in = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([GPTNeoXLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([GPTNeoXLayer(config, i) for i in range(config.num_hidden_layers)])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
         self.gradient_checkpointing = False
@@ -454,6 +504,10 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
             `past_key_values`).
         """
+
+        print_fwd and logzero.logger.warning(f'GPTNeoXModel forward: {gpuinfo}')
+        print_fwd and logzero.logger.warning(f'GPTNeoXModel forward input_ids = {input_ids.shape}')
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -503,6 +557,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_in(input_ids)
+            print_fwd and logzero.logger.warning(f'embed_in: input_ids={input_ids.shape} -> inputs_embeds={inputs_embeds.shape}')
 
         hidden_states = inputs_embeds
 
@@ -520,6 +575,8 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
+            print_fwd and logzero.logger.warning(f'GPTNeoXModel layer[{i}]: {gpuinfo}')
+
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
@@ -536,6 +593,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                     head_mask[i],
                 )
             else:
+
                 outputs = layer(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -544,6 +602,9 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                 )
+                
+                print_fwd and logzero.logger.warning(f'layer[{i}]: hidden_states={hidden_states.shape} -> outputs={outputs[0].shape}')
+                
             hidden_states = outputs[0]
             if use_cache is True:
                 presents = presents + (outputs[1],)
@@ -557,6 +618,8 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
 
         if not return_dict:
             return tuple(v for v in [hidden_states, presents, all_hidden_states, all_attentions] if v is not None)
+
+        print_fwd and logzero.logger.warning(f'GPTNeoXModel before return: {gpuinfo}')
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
