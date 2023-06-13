@@ -275,7 +275,9 @@ class RotaryEmbedding(torch.nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
             self.cos_cached = emb.cos()[None, None, :, :]
             self.sin_cached = emb.sin()[None, None, :, :]
-        return self.cos_cached[:seq_len, ...].to(x.device), self.sin_cached[:seq_len, ...].to(x.device)
+        cos = self.cos_cached[:seq_len, ...].to(x.device).to(x.dtype)
+        sin = self.sin_cached[:seq_len, ...].to(x.device).to(x.dtype)
+        return cos, sin
 
 
 def rotate_half(x):
