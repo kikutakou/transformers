@@ -84,6 +84,7 @@ from .utils.import_utils import ENV_VARS_TRUE_VALUES, is_sagemaker_mp_enabled, i
 from .utils.quantization_config import BitsAndBytesConfig, GPTQConfig, QuantizationMethod
 from .utils.versions import require_version_core
 
+import logzero
 
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()
 XLA_DOWNCAST_BF16 = os.environ.get("XLA_DOWNCAST_BF16", "0").upper()
@@ -1197,6 +1198,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
 
         logger.info(f"Instantiating {cls.__name__} model under default dtype {dtype}.")
         dtype_orig = torch.get_default_dtype()
+        logzero.logger.info(f'torch.set_default_dtype {dtype}')
         torch.set_default_dtype(dtype)
         return dtype_orig
 
@@ -2084,6 +2086,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         use_safetensors: bool = None,
         **kwargs,
     ):
+        logzero.logger.info(kwargs)
         r"""
         Instantiate a pretrained pytorch model from a pre-trained model configuration.
 
@@ -2895,6 +2898,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                         raise ValueError(
                             f'`torch_dtype` can be either `torch.dtype` or `"auto"`, but received {torch_dtype}'
                         )
+                logzero.logger.info(f'call cls._set_default_torch_dtype({torch_dtype})')
                 dtype_orig = cls._set_default_torch_dtype(torch_dtype)
 
             # Check if `_keep_in_fp32_modules` is not None
@@ -3141,6 +3145,9 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             # restore default dtype
             if dtype_orig is not None:
                 torch.set_default_dtype(dtype_orig)
+                logzero.logger.info(f'reset torch.set_default_dtype original({dtype_orig})')
+
+                logzero.logger.info(f'call _load_pretrained_model')
 
             (
                 model,
@@ -3260,6 +3267,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         is_quantized=False,
         keep_in_fp32_modules=None,
     ):
+    
+        logzero.logger.info(f'_load_pretrained_model {model=}, {dtype=}')
         is_safetensors = False
         if is_quantized:
             from .utils.bitsandbytes import set_module_quantized_tensor_to_device

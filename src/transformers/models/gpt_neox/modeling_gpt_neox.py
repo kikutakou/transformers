@@ -39,6 +39,7 @@ from ...modeling_utils import PreTrainedModel
 from ...utils import logging
 from .configuration_gpt_neox import GPTNeoXConfig
 
+import logzero
 
 logger = logging.get_logger(__name__)
 
@@ -183,7 +184,9 @@ class GPTNeoXAttention(nn.Module):
         if has_layer_past:
             seq_len += layer_past[0].shape[-2]
         cos, sin = self.rotary_emb(value, seq_len=seq_len)
+        print(cos.dtype, sin.dtype)
         query, key = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, position_ids)
+        print(query.dtype, key.dtype)
         query = torch.cat((query, query_pass), dim=-1)
         key = torch.cat((key, key_pass), dim=-1)
 
@@ -273,6 +276,7 @@ class GPTNeoXAttention(nn.Module):
             attn_scores = attn_scores + attention_mask
 
         attn_weights = nn.functional.softmax(attn_scores, dim=-1)
+        print(attn_weights.dtype)
         attn_weights = attn_weights.to(value.dtype)
 
         # Mask heads if we want to
@@ -293,6 +297,7 @@ def attention_mask_func(attention_scores, ltor_mask):
 class GPTNeoXRotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings, base=10000, device=None):
         super().__init__()
+        logzero.logger.info(f'GPTNeoXRotaryEmbedding.__init__()')
 
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
@@ -305,6 +310,7 @@ class GPTNeoXRotaryEmbedding(torch.nn.Module):
         self._set_cos_sin_cache(seq_len=max_position_embeddings, device=self.inv_freq.device)
 
     def _set_cos_sin_cache(self, seq_len, device):
+        logzero.logger.info(f'GPTNeoXRotaryEmbedding._set_cos_sin_cache inv_freq={self.inv_freq.dtype}')
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device).float()
 
